@@ -1,11 +1,15 @@
 import inspect
 from functools import wraps
-from blinker import signal
+from blinker import signal, ANY
 
+from contextlib import contextmanager
+
+EVENT = signal('EVENT')
 
 class Call(dict):
 
     def __init__(self, func, args, kwargs):
+        self.func = func
         sig = self.signature = inspect.signature(func)
         bound_args = sig.bind(*args, **kwargs).arguments
         
@@ -18,7 +22,7 @@ class Call(dict):
     def __iter__(self):
         for k, v in self.items():
             param = self.signature.parameters[k]
-            if not param.kind == param.KEYWORD_ONLY:
+            if param.kind != param.KEYWORD_ONLY:
                 yield v
 
     def __getitem__(self, key):
@@ -26,28 +30,33 @@ class Call(dict):
             return list(self)[key]
         return super().__getitem__(key)
     
-    @classmethod
-    def get_signal(cls, func):
-        qualname = f"{func.__module__}.{func.__qualname__}"
-        return signal(qualname)
+    def __getattr__(self, key):
+        # enabe dot access
+        return self[key]
 
 
 
-class EventLog:
+class EventLog(list):
 
-    def __init__(self):
-        self.log = []
-    
-    def __iter__(self):
-        return iter(self.log[-1])
-    
-    def __getitem__(self, key):
-        return self.log[-1][key]
-    
     def log_event(self, sender, event=None):
-        self.log.append(event)
+        self.append(event)
 
-    def __or__(self, func):
-        s = Call.get_signal(func)
-        s.connect(self.log_event)
-        return self
+    
+    @contextmanager
+    def __or__(self, when):
+        if inspect.isfunction(when) and when.__qualname__ == '<lambda>':
+            sender = ANY
+            def log_event(sender, event=None):
+                if when(event):
+                    self.log_event(sender, event=event)
+        else:
+            sender = when
+            log_event = self.log_event
+        EVENT.connect(log_event, sender=sender)
+        yield self
+        EVENT.disconnect(log_event, sender=sender)
+        self.clear()
+
+    def log(self, obj):
+        sender = type(obj)
+        EVENT.send(sender, event=obj)
